@@ -1,0 +1,22 @@
+{
+  "name": "appdev-midterms",
+  "private": true,
+  "version": "1.0.0",
+  "description": "The Wait — a 2.5D avant garde traffic intersection simulation",
+  "scripts": {
+    "build": "vite build",
+    "watch": "vite build --watch"
+  },
+  "dependencies": {
+    "chance": "^1.1.12",
+    "gsap": "^3.12.7",
+    "howler": "^2.2.4",
+    "simplex-noise": "^4.0.3",
+    "three": "^0.174.0",
+    "tweakpane": "^4.0.5"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^6.3.5"
+  }
+}
