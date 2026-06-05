@@ -5,7 +5,7 @@
  */
 
 import { Howl } from 'howler';
-import wilhelmUrl from './sounds/Wilhelm Scream - Sound Effect [PP7WJL2JtLs].mp3';
+import wilhelmUrl from './sounds/wilhelm-scream.mp3';
 
 let ctx = null;
 let masterGain = null;
