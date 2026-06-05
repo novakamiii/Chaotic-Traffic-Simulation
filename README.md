@@ -1,4 +1,8 @@
-# Running the project
+# Site
+
+**http://chaotictrafficsim.freedev.app/**
+
+# Running the project locally
 
 1. Clone this repo.
 2. Go to the project root.
