@@ -5,7 +5,7 @@
  */
 
 import { Howl } from 'howler';
-import wilhelmUrl from './sounds/wilhelm-scream.mp3';
+import wilhelmUrl from './sounds/wilhelm-scream.mp3?inline';
 
 let ctx = null;
 let masterGain = null;
