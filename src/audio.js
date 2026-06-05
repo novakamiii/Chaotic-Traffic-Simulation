@@ -5,6 +5,7 @@
  */
 
 import { Howl } from 'howler';
+import wilhelmUrl from './sounds/Wilhelm Scream - Sound Effect [PP7WJL2JtLs].mp3';
 
 let ctx = null;
 let masterGain = null;
@@ -181,4 +182,44 @@ export function crash() {
   osc.stop(c.currentTime + 1.2);
 
   return new Howl({ src: [''], volume: 0 });
+}
+
+// ─── Wilhelm Scream (pedestrian hit) ────────────────────────────────────
+
+let wilhelmBuffer = null;
+
+export async function playWilhelmScream(isFemale) {
+  const c = getCtx();
+  if (!c) return;
+
+  // Decode the MP3 once, cache the buffer
+  if (!wilhelmBuffer) {
+    try {
+      const resp = await fetch(wilhelmUrl);
+      const arrayBuf = await resp.arrayBuffer();
+      wilhelmBuffer = await c.decodeAudioData(arrayBuf);
+    } catch {
+      return; // File not loaded yet, skip silently
+    }
+  }
+
+  // Create a buffer source node
+  const source = c.createBufferSource();
+  source.buffer = wilhelmBuffer;
+
+  // Female → higher pitch (1.0–1.4), Male → lower pitch (0.6–1.0)
+  const baseRate = isFemale ? 1.0 : 0.6;
+  const variation = Math.random() * 0.4;
+  source.playbackRate.value = baseRate + variation;
+
+  // Envelope: quick attack, full scream, fade out
+  const gain = c.createGain();
+  gain.gain.setValueAtTime(0, c.currentTime);
+  gain.gain.linearRampToValueAtTime(0.5, c.currentTime + 0.02);
+  gain.gain.setValueAtTime(0.5, c.currentTime + 1.0);
+  gain.gain.exponentialRampToValueAtTime(0.001, c.currentTime + 2.0);
+
+  source.connect(gain);
+  gain.connect(masterGain);
+  source.start();
 }

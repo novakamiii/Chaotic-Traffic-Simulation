@@ -4,6 +4,27 @@ import Chance from 'chance';
 
 const chance = new Chance();
 
+// Turn path definitions — where each car goes at the intersection
+// start = entry point, mid = center of intersection, end = exit point, newDir = direction after turn
+const TURN_PATHS = {
+  north: {
+    left:  { start: { x: -1.75, z: 4.5 }, mid: { x: -1.75, z: 0 }, end: { x: -5, z: 1.75 }, newDir: 'west' },
+    right: { start: { x: -1.75, z: 4.5 }, mid: { x: -1.75, z: 0 }, end: { x: 5, z: -1.75 }, newDir: 'east' },
+  },
+  south: {
+    left:  { start: { x: 1.75, z: -4.5 }, mid: { x: 1.75, z: 0 }, end: { x: 5, z: -1.75 }, newDir: 'east' },
+    right: { start: { x: 1.75, z: -4.5 }, mid: { x: 1.75, z: 0 }, end: { x: -5, z: 1.75 }, newDir: 'west' },
+  },
+  east: {
+    left:  { start: { x: 4.5, z: -1.75 }, mid: { x: 0, z: -1.75 }, end: { x: -1.75, z: -5 }, newDir: 'north' },
+    right: { start: { x: 4.5, z: -1.75 }, mid: { x: 0, z: -1.75 }, end: { x: 1.75, z: 5 }, newDir: 'south' },
+  },
+  west: {
+    left:  { start: { x: -4.5, z: 1.75 }, mid: { x: 0, z: 1.75 }, end: { x: 1.75, z: 5 }, newDir: 'south' },
+    right: { start: { x: -4.5, z: 1.75 }, mid: { x: 0, z: 1.75 }, end: { x: -1.75, z: -5 }, newDir: 'north' },
+  },
+};
+
 const BODY_COLORS = [
   0xe74c3c, 0x3498db, 0x2ecc71, 0xf39c12,
   0x9b59b6, 0x1abc9c, 0xe67e22, 0xecf0f1,
@@ -15,15 +36,30 @@ export class Vehicle {
   constructor(scene, lane, spawnZ) {
     this.scene = scene;
     this.lane = lane;
+    this.dir = lane.dir; // mutable — changes when car turns at intersection
     this.alive = true;
     this.stopped = false;
-    this.speed = 3 + Math.random() * 4;
-    this.baseSpeed = this.speed;
     this.aggression = chance.floating({ min: 0, max: 1 });
+
+    // Turn intent — pick at spawn
+    const r = Math.random();
+    this.intent = r < 0.5 ? 'straight' : r < 0.76 ? 'left' : 'right';
+
+    // Turn animation state
+    this.turning = false;
+    this.turnProgress = 0;
+    this.turnPath = null;
+    this.turnLength = 0;
+    this.turned = false;
+    // Speed spread: aggressive cars are faster (6-10), patient cars are slower (1.5-5)
+    this.baseSpeed = 1.5 + this.aggression * 8.5; // 1.5 → 10 range
+    this.speed = this.baseSpeed;
     this.patience = 5 + (1 - this.aggression) * 15; // low aggression = more patient (5-20s)
+    this.hp = 3;
+    this.maxHp = 3;
+    this.lastHitTime = 0;
     this.waitTimer = 0;
     this.honkCooldown = 0;
-    this.honkInterval = 0;
 
     const color = chance.pickone(BODY_COLORS);
 
@@ -125,31 +161,121 @@ export class Vehicle {
     scene.add(this.group);
   }
 
-  update(delta, intersection, lightState, nearbyAhead = []) {
+  update(delta, intersection, lightState, nearbyAhead = [], oncoming = []) {
     if (!this.alive) return {};
 
-    const dir = this.lane.dir;
+    const dir = this.dir;
     const pos = this.group.position;
     let ranRed = false;
     let honked = false;
 
-    // ─── Position relative to intersection ───────────────────────────
-    const inIntersection = Math.abs(pos.x) < 4.5 && Math.abs(pos.z) < 4.5;
+    // ─── Turn animation handling ─────────────────────────────────────
+    if (this.turning && this.turnPath) {
+      this.turnProgress += (this.speed * delta) / this.turnLength;
 
-    // "Before intersection" = approaching the stop line (direction-aware)
-    let beforeIntersection = false;
-    switch (dir) {
-      case 'north': beforeIntersection = pos.z > 4.5 && !inIntersection; break;
-      case 'south': beforeIntersection = pos.z < -4.5 && !inIntersection; break;
-      case 'east':  beforeIntersection = pos.x < -4.5 && !inIntersection; break;
-      case 'west':  beforeIntersection = pos.x > 4.5 && !inIntersection; break;
+      if (this.turnProgress >= 1) {
+        // Turn complete — snap to exit position and switch direction
+        const end = this.turnPath.end;
+        pos.set(end.x, 0, end.z);
+        this.dir = this.turnPath.newDir;
+        this.intent = 'straight';
+        this.turning = false;
+        this.turned = true;
+        // Set rotation for the new direction
+        switch (this.dir) {
+          case 'north': this.group.rotation.y = 0; break;
+          case 'south': this.group.rotation.y = Math.PI; break;
+          case 'east':  this.group.rotation.y = Math.PI / 2; break;
+          case 'west':  this.group.rotation.y = -Math.PI / 2; break;
+        }
+      } else {
+        // Interpolate along the path: start→mid→end, speed-normalised
+        const t = this.turnProgress;
+        const s = this.turnPath.start;
+        const m = this.turnPath.mid;
+        const e = this.turnPath.end;
+
+        const d1 = Math.sqrt((m.x - s.x) ** 2 + (m.z - s.z) ** 2);
+        const d2 = Math.sqrt((e.x - m.x) ** 2 + (e.z - m.z) ** 2);
+        const midT = d1 / (d1 + d2);
+
+        let px, pz, nx, nz;
+        const step = (lt) => lt * lt * (3 - 2 * lt); // smoothstep
+
+        if (t < midT) {
+          const lt = t / midT;
+          const st = step(lt);
+          px = s.x + (m.x - s.x) * st;
+          pz = s.z + (m.z - s.z) * st;
+          // Next position for rotation
+          const nlt = Math.min(1, (t + 0.005) / midT);
+          const nst = step(nlt);
+          nx = s.x + (m.x - s.x) * nst;
+          nz = s.z + (m.z - s.z) * nst;
+        } else {
+          const lt = (t - midT) / (1 - midT);
+          const st = step(lt);
+          px = m.x + (e.x - m.x) * st;
+          pz = m.z + (e.z - m.z) * st;
+          const nlt = Math.min(1, (t - midT + 0.005) / (1 - midT));
+          const nst = step(nlt);
+          nx = m.x + (e.x - m.x) * nst;
+          nz = m.z + (e.z - m.z) * nst;
+        }
+
+        pos.set(px, 0, pz);
+        const dx = nx - px;
+        const dz = nz - pz;
+        if (Math.abs(dx) > 0.0001 || Math.abs(dz) > 0.0001) {
+          this.group.rotation.y = Math.atan2(dx, -dz);
+        }
+      }
+
+      // Never stop while turning
+      this.stopped = false;
+      this.speed = Math.max(this.baseSpeed * 0.6, this.speed);
+      this.waitTimer = 0;
+      return {};
     }
 
-    // Check if intersection is blocked by a stopped car
+    // ─── Initiate turn when entering the intersection ────────────────
+    const inIntersection = Math.abs(pos.x) < 4.5 && Math.abs(pos.z) < 4.5;
+
+    if (inIntersection && this.intent !== 'straight' && !this.turned) {
+      const path = TURN_PATHS[dir]?.[this.intent];
+      if (path) {
+        this.turnPath = path;
+        this.turning = true;
+        this.turnProgress = 0;
+        const d1 = Math.sqrt((path.mid.x - path.start.x) ** 2 + (path.mid.z - path.start.z) ** 2);
+        const d2 = Math.sqrt((path.end.x - path.mid.x) ** 2 + (path.end.z - path.mid.z) ** 2);
+        this.turnLength = d1 + d2;
+        // Snap to start position
+        pos.set(path.start.x, 0, path.start.z);
+        // Process the first turn frame
+        this.turnProgress = (this.speed * delta) / this.turnLength;
+        return {};
+      }
+      // No path found — fall through to straight
+      this.intent = 'straight';
+    }
+
+    // ─── Position relative to intersection (for straight / approach) ─
+    let beforeIntersection = false;
+    switch (dir) {
+      case 'north': beforeIntersection = pos.z > 4.5 && pos.z < 22 && !inIntersection; break;
+      case 'south': beforeIntersection = pos.z < -4.5 && pos.z > -22 && !inIntersection; break;
+      case 'east':  beforeIntersection = pos.x < -4.5 && pos.x > -22 && !inIntersection; break;
+      case 'west':  beforeIntersection = pos.x > 4.5 && pos.x < 22 && !inIntersection; break;
+    }
+
+    // Check if intersection is blocked (stopped car OR turning car ahead)
     const interBlocked = nearbyAhead.some((other) => {
       if (!other.alive) return false;
       const oPos = other.group.position;
-      return Math.abs(oPos.x) < 5 && Math.abs(oPos.z) < 5 && other.stopped;
+      const inInter = Math.abs(oPos.x) < 5 && Math.abs(oPos.z) < 5;
+      // Blocked if stopped, OR if still turning through
+      return inInter && (other.stopped || other.intent !== 'straight');
     });
 
     // Generic tailgating — car too close ahead
@@ -158,11 +284,21 @@ export class Vehicle {
       return pos.distanceTo(other.group.position) < 4;
     });
 
+    // ─── Distance to stop line ───────────────────────────────────────
+    let distToStop = Infinity;
+    switch (dir) {
+      case 'north': distToStop = pos.z - 4.5; break;
+      case 'south': distToStop = -4.5 - pos.z; break;
+      case 'east':  distToStop = -4.5 - pos.x; break;
+      case 'west':  distToStop = pos.x - 4.5; break;
+    }
+
     // ─── Decision logic ──────────────────────────────────────────────
     if (inIntersection) {
       // Already inside — MUST clear it. Never stop. Speed up.
       this.stopped = false;
-      this.speed = Math.min(8, this.speed + delta * 2);
+      const maxInterSpeed = Math.max(this.baseSpeed * 1.3, 4);
+      this.speed = Math.min(maxInterSpeed, this.speed + delta * 2);
       this.waitTimer = 0;
     } else if (beforeIntersection && interBlocked) {
       // Approach is clear but intersection is occupied — wait
@@ -171,14 +307,25 @@ export class Vehicle {
       // Too close to the car ahead
       this.stopped = true;
     } else if (beforeIntersection && lightState === 'red') {
-      // Normal red light stop
+      // Coast to the stop line — don't slam brakes at z=20
+      if (distToStop < 0.8) {
+        // At the stop line — stop
+        this.stopped = true;
+      } else {
+        // Coast toward the stop line at a reduced speed
+        this.stopped = false;
+        const minCrawl = Math.max(0.5, this.baseSpeed * 0.15);
+        this.speed = Math.max(minCrawl, Math.min(this.baseSpeed, distToStop * 1.8));
+      }
+    } else if (beforeIntersection && this.intent === 'left' && !this.turned && oncoming.length > 0 && distToStop < 6) {
+      // Yield to oncoming traffic before turning left
       this.stopped = true;
     } else {
       this.stopped = false;
     }
 
-    // Ease speed back to base when not in intersection
-    if (!inIntersection) {
+    // Ease speed back to base when freely moving (not coasting to a red light)
+    if (!inIntersection && !this.stopped && !(beforeIntersection && lightState === 'red')) {
       this.speed += (this.baseSpeed - this.speed) * 0.05;
     }
 
@@ -226,6 +373,33 @@ export class Vehicle {
     if (ranRed) result.ranRed = true;
     if (honked) result.honk = true;
     return result;
+  }
+
+  takeDamage(amount, scene) {
+    if (!this.alive) return;
+
+    this.hp -= amount;
+    this.lastHitTime = performance.now();
+
+    // Flash the car body red briefly
+    const bodyMesh = this.group.children[0];
+    if (bodyMesh && bodyMesh.material) {
+      const origColor = bodyMesh.material.color.getHex();
+      bodyMesh.material.emissive.setHex(0xff0000);
+      bodyMesh.material.emissiveIntensity = 0.6;
+      gsap.to(bodyMesh.material, {
+        emissiveIntensity: 0,
+        duration: 0.3,
+        ease: 'power2.out',
+        onComplete: () => {
+          bodyMesh.material.emissive.setHex(0x000000);
+        },
+      });
+    }
+
+    if (this.hp <= 0) {
+      this.explode(scene);
+    }
   }
 
   explode(scene) {

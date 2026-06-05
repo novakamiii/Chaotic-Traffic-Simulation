@@ -148,6 +148,27 @@ function dispatch(): void
     $method = getMethod();
 
     try {
+        // Serve Vite-built static assets (dist/assets/*)
+        if (str_starts_with($route, '/assets/')) {
+            $file = __DIR__ . '/dist' . rawurldecode($route);
+            if (file_exists($file)) {
+                $mimeTypes = [
+                    'mp3'  => 'audio/mpeg',
+                    'js'   => 'application/javascript',
+                    'css'  => 'text/css',
+                    'png'  => 'image/png',
+                    'jpg'  => 'image/jpeg',
+                    'svg'  => 'image/svg+xml',
+                    'webm' => 'video/webm',
+                ];
+                $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+                sendSecurityHeaders();
+                header('Content-Type: ' . ($mimeTypes[$ext] ?? 'application/octet-stream'));
+                readfile($file);
+                return;
+            }
+        }
+
         match (true) {
             $route === '/' && $method === 'GET' => renderAppPage(),
             default => renderError(404, 'Not found. The intersection awaits at /.'),

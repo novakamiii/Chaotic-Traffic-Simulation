@@ -16,5 +16,5 @@ echo ""
 npx concurrently \
   --names "PHP,VITE" \
   --prefix-colors "yellow,cyan" \
-  "php -S localhost:8000 -t \"$SCRIPT_DIR\"" \
+  "php -S localhost:8000 -t \"$SCRIPT_DIR\" \"$SCRIPT_DIR/index.php\"" \
   "npx vite build --watch --config \"$SCRIPT_DIR/vite.config.js\""

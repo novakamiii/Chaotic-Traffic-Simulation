@@ -4,24 +4,10 @@ import { TrafficLight } from './trafficLight.js';
 import { Vehicle } from './vehicle.js';
 import { Pedestrian } from './pedestrian.js';
 import { LANES, SPAWN_POINTS } from './intersection.js';
-import { honk, startBeeping, stopBeeping } from './audio.js';
+import { honk, startBeeping, stopBeeping, playWilhelmScream } from './audio.js';
 import Chance from 'chance';
 
 const chance = new Chance();
-
-const PEDESTRIAN_SPAWN_POINTS = [
-  { x: -5.5, z: -5.5 },
-  { x: 5.5, z: -5.5 },
-  { x: -5.5, z: 5.5 },
-  { x: 5.5, z: 5.5 },
-];
-
-const PEDESTRIAN_TARGETS = {
-  '-5.5,-5.5': { x: 0, z: -4.5 },
-  '5.5,-5.5': { x: 0, z: -4.5 },
-  '-5.5,5.5': { x: 0, z: 4.5 },
-  '5.5,5.5': { x: 0, z: 4.5 },
-};
 
 export class TrafficManager {
   constructor(scene) {
@@ -38,6 +24,7 @@ export class TrafficManager {
     this.totalCarsSpawned = 0;
     this.totalPedestrians = 0;
     this.jaywalkers = 0;
+    this.hitPedestrians = 0;
     this.accidents = 0;
     this.ranReds = 0;
     this.onAccident = null;
@@ -71,9 +58,10 @@ export class TrafficManager {
     const events = [];
     this.vehicles.forEach((v) => {
       if (!v.alive) return;
-      const lightState = this.getLightStateForLane(v.lane);
+      const lightState = this.getLightStateForLane(v);
       const nearby = this.getVehiclesAhead(v);
-      const result = v.update(delta, null, lightState, nearby);
+      const oncoming = this.getOncomingTraffic(v);
+      const result = v.update(delta, null, lightState, nearby, oncoming);
       if (result.ranRed) {
         this.ranReds++;
         if (this.chaosSystem) this.chaosSystem.addEvent('ranRed');
@@ -82,6 +70,28 @@ export class TrafficManager {
       if (result.honk) events.push('honk');
       if (result.offscreen) events.push('offscreen');
     });
+
+    // Bump detection — check all vehicle pairs for proximity collisions
+    const now = performance.now();
+    for (let i = 0; i < this.vehicles.length; i++) {
+      const a = this.vehicles[i];
+      if (!a.alive) continue;
+      for (let j = i + 1; j < this.vehicles.length; j++) {
+        const b = this.vehicles[j];
+        if (!b.alive) continue;
+        // Skip stopped-stopped pairs — that's just queued traffic
+        if (a.stopped && b.stopped) continue;
+        const dist = a.group.position.distanceTo(b.group.position);
+        if (dist < 2.5 && now - a.lastHitTime > 800 && now - b.lastHitTime > 800) {
+          a.takeDamage(1, this.scene);
+          b.takeDamage(1, this.scene);
+          if (this.chaosSystem) {
+            this.chaosSystem.addEvent('nearMiss');
+            this.chaosSystem.level += 0.01;
+          }
+        }
+      }
+    }
 
     // Remove dead vehicles
     this.vehicles = this.vehicles.filter((v) => v.alive);
@@ -94,8 +104,43 @@ export class TrafficManager {
     // Update pedestrians
     const isWalkGreen = this.lights.ns.isRed(); // walk signal = cars on NS are stopped
     this.pedestrians.forEach((p) => {
-      const result = p.update(delta, isWalkGreen);
+      const result = p.update(delta, isWalkGreen, this.vehicles);
       if (result.jaywalking) this.jaywalkers++;
+    });
+
+    // Vehicle-pedestrian collisions — cars can run over pedestrians on the crosswalk
+    this.vehicles.forEach((v) => {
+      if (!v.alive) return;
+      this.pedestrians.forEach((p) => {
+        if (!p.alive || p.phase !== 'crossing') return;
+        const dist = v.group.position.distanceTo(p.group.position);
+        if (dist < 1.5) {
+          // Pedestrian hit! Remove with a quick scatter effect
+          this.hitPedestrians++;
+          if (this.chaosSystem) {
+            this.chaosSystem.addEvent('nearMiss');
+            this.chaosSystem.level += 0.03;
+          }
+          // Gore at impact point
+          this.spawnGore(v.group.position.clone(), this.scene);
+          // Wilhelm scream with gender-based pitch
+          playWilhelmScream(p.gender === 'female');
+          // Toss the pedestrian and remove
+          const pPos = p.group.position;
+          p.alive = false;
+          gsap.to(pPos, {
+            y: 1.5,
+            duration: 0.3,
+            ease: 'power2.out',
+          });
+          gsap.to(p.group.scale, {
+            x: 0, y: 0, z: 0,
+            duration: 0.4,
+            delay: 0.1,
+            onComplete: () => p.dispose(),
+          });
+        }
+      });
     });
 
     // Remove finished pedestrians
@@ -135,9 +180,9 @@ export class TrafficManager {
     });
   }
 
-  getLightStateForLane(lane) {
-    // NS lanes check NS light, EW lanes check EW light
-    if (lane.dir === 'north' || lane.dir === 'south') {
+  getLightStateForLane(vehicle) {
+    // Use vehicle's mutable dir — handles turned cars correctly
+    if (vehicle.dir === 'north' || vehicle.dir === 'south') {
       return this.lights.ns.state;
     }
     return this.lights.ew.state;
@@ -145,11 +190,11 @@ export class TrafficManager {
 
   getVehiclesAhead(vehicle) {
     const pos = vehicle.group.position;
-    const dir = vehicle.lane.dir;
+    const dir = vehicle.dir;
 
     return this.vehicles.filter((other) => {
       if (other === vehicle || !other.alive) return false;
-      if (other.lane.dir !== dir) return false;
+      if (other.dir !== dir) return false;
 
       // Same lane check (lateral proximity)
       const otherPos = other.group.position;
@@ -169,6 +214,38 @@ export class TrafficManager {
       }
 
       return isAhead && pos.distanceTo(otherPos) < 20;
+    });
+  }
+
+  getOncomingTraffic(vehicle) {
+    const oppositeDirs = { north: 'south', south: 'north', east: 'west', west: 'east' };
+    const oppDir = oppositeDirs[vehicle.dir];
+    const range = 12;
+
+    return this.vehicles.filter((other) => {
+      if (other === vehicle || !other.alive) return false;
+      if (other.dir !== oppDir) return false;
+
+      const oPos = other.group.position;
+      // Already in the intersection
+      if (Math.abs(oPos.x) < 5 && Math.abs(oPos.z) < 5) return true;
+
+      // Approaching the intersection from the far side
+      switch (vehicle.dir) {
+        case 'north':
+          // Southbound approaching from below (z < -4.5)
+          return oPos.z < -4.5 && oPos.z > -4.5 - range;
+        case 'south':
+          // Northbound approaching from above (z > 4.5)
+          return oPos.z > 4.5 && oPos.z < 4.5 + range;
+        case 'east':
+          // Westbound approaching from right (x > 4.5)
+          return oPos.x > 4.5 && oPos.x < 4.5 + range;
+        case 'west':
+          // Eastbound approaching from left (x < -4.5)
+          return oPos.x < -4.5 && oPos.x > -4.5 - range;
+      }
+      return false;
     });
   }
 
@@ -216,11 +293,27 @@ export class TrafficManager {
   }
 
   spawnPedestrian() {
-    const start = chance.pickone(PEDESTRIAN_SPAWN_POINTS);
-    const key = `${start.x},${start.z}`;
-    const target = PEDESTRIAN_TARGETS[key] ?? { x: 0, z: 0 };
+    // Pick a crosswalk side and a travel direction
+    const side = chance.pickone(['north', 'south']);
+    const direction = chance.pickone(['east', 'west']);
+    const z = side === 'north' ? -5.5 : 5.5;
+    const dist = 15 + Math.random() * 10; // 15-25 units from intersection
 
-    const p = new Pedestrian(this.scene, start, target);
+    let approachX, cornerX, targetX, exitX;
+    if (direction === 'east') {
+      approachX = -dist;
+      cornerX = -5.5;
+      targetX = 5.5;
+      exitX = dist;
+    } else {
+      approachX = dist;
+      cornerX = 5.5;
+      targetX = -5.5;
+      exitX = -dist;
+    }
+
+    const targetZ = side === 'north' ? 5.5 : -5.5;
+    const p = new Pedestrian(this.scene, approachX, cornerX, z, targetX, targetZ, exitX);
     this.pedestrians.push(p);
     this.totalPedestrians++;
   }
@@ -265,11 +358,11 @@ export class TrafficManager {
     // Sprinkle debris particles at the crash site
     this.spawnDebris(crashPos);
 
-    // Scatter nearby pedestrians
+    // Scatter nearby pedestrians (any phase)
     this.pedestrians.forEach((p) => {
-      if (!p.alive || !p.crossing) return;
+      if (!p.alive || p.finished) return;
       const pp = p.group.position;
-      if (pp.distanceTo(crashPos) < 6) {
+      if (pp.distanceTo(crashPos) < 8) {
         p.speed *= 3;
       }
     });
@@ -350,7 +443,159 @@ export class TrafficManager {
       accidents: this.accidents,
       ranReds: this.ranReds,
       jaywalkers: this.jaywalkers,
+      hitPedestrians: this.hitPedestrians,
     };
+  }
+
+  spawnGore(position, scene) {
+    // ── Blood splatter on the ground ──────────────────────────────
+    const splashCanvas = document.createElement('canvas');
+    const s = 128;
+    splashCanvas.width = s;
+    splashCanvas.height = s;
+    const ctx = splashCanvas.getContext('2d');
+
+    // Translucent dark red background circle
+    const gradient = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    gradient.addColorStop(0, 'rgba(160, 0, 0, 0.9)');
+    gradient.addColorStop(0.3, 'rgba(120, 0, 0, 0.7)');
+    gradient.addColorStop(0.6, 'rgba(80, 0, 0, 0.4)');
+    gradient.addColorStop(1, 'rgba(40, 0, 0, 0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(s / 2, s / 2, s / 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Random splatter streaks
+    ctx.strokeStyle = 'rgba(180, 20, 20, 0.6)';
+    ctx.lineWidth = 2 + Math.random() * 3;
+    for (let i = 0; i < 8; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const len = 10 + Math.random() * 30;
+      ctx.beginPath();
+      ctx.moveTo(s / 2, s / 2);
+      ctx.lineTo(
+        s / 2 + Math.cos(angle) * len,
+        s / 2 + Math.sin(angle) * len,
+      );
+      ctx.stroke();
+    }
+
+    // Small dot splatter
+    ctx.fillStyle = 'rgba(180, 20, 20, 0.5)';
+    for (let i = 0; i < 12; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 20 + Math.random() * 40;
+      const r = 2 + Math.random() * 5;
+      ctx.beginPath();
+      ctx.arc(
+        s / 2 + Math.cos(angle) * dist,
+        s / 2 + Math.sin(angle) * dist,
+        r, 0, Math.PI * 2,
+      );
+      ctx.fill();
+    }
+
+    const splashTex = new THREE.CanvasTexture(splashCanvas);
+    const splashMat = new THREE.SpriteMaterial({
+      map: splashTex,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.NormalBlending,
+    });
+    const splash = new THREE.Sprite(splashMat);
+    splash.position.set(position.x, 0.02, position.z);
+    splash.scale.set(2.5 + Math.random(), 2.5 + Math.random(), 1);
+    scene.add(splash);
+
+    // Fade out over 8 seconds
+    gsap.to(splashMat, {
+      opacity: 0,
+      duration: 8,
+      delay: 0.5,
+      ease: 'power1.out',
+      onComplete: () => {
+        scene.remove(splash);
+        splashMat.dispose();
+        splashTex.dispose();
+      },
+    });
+
+    // ── Blood spray particles ─────────────────────────────────────
+    const pCount = 20;
+    const pPositions = new Float32Array(pCount * 3);
+    const pColors = new Float32Array(pCount * 3);
+
+    for (let i = 0; i < pCount; i++) {
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.random() * Math.PI;
+      const r = 0.3 + Math.random() * 1.5;
+      pPositions[i * 3] = position.x + r * Math.sin(theta) * Math.cos(phi);
+      pPositions[i * 3 + 1] = position.y + 0.3 + Math.random() * 0.5;
+      pPositions[i * 3 + 2] = position.z + r * Math.sin(theta) * Math.sin(phi);
+
+      const dark = 0.1 + Math.random() * 0.3;
+      pColors[i * 3] = 0.5 + Math.random() * 0.3;
+      pColors[i * 3 + 1] = dark;
+      pColors[i * 3 + 2] = dark;
+    }
+
+    const pGeo = new THREE.BufferGeometry();
+    pGeo.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+    pGeo.setAttribute('color', new THREE.BufferAttribute(pColors, 3));
+
+    const pMat = new THREE.PointsMaterial({
+      size: 0.15,
+      vertexColors: true,
+      transparent: true,
+      opacity: 1,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    const particles = new THREE.Points(pGeo, pMat);
+    scene.add(particles);
+
+    // Animate spray outward
+    const targets = new Float32Array(pCount * 3);
+    for (let i = 0; i < pCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 1.5 + Math.random() * 3;
+      targets[i * 3] = position.x + Math.cos(angle) * dist;
+      targets[i * 3 + 1] = position.y + Math.random() * 1.5;
+      targets[i * 3 + 2] = position.z + Math.sin(angle) * dist;
+    }
+
+    const startPos = [...pPositions];
+
+    gsap.to({ t: 0 }, {
+      t: 1,
+      duration: 0.6 + Math.random() * 0.3,
+      ease: 'power2.out',
+      onUpdate: function () {
+        const t = this.targets()[0].t;
+        const arr = particles.geometry.attributes.position.array;
+        for (let i = 0; i < pCount; i++) {
+          arr[i * 3] = startPos[i * 3] + (targets[i * 3] - startPos[i * 3]) * t;
+          arr[i * 3 + 1] = startPos[i * 3 + 1] + (targets[i * 3 + 1] - startPos[i * 3 + 1]) * t
+            + Math.sin(t * Math.PI) * 1.5;
+          arr[i * 3 + 2] = startPos[i * 3 + 2] + (targets[i * 3 + 2] - startPos[i * 3 + 2]) * t;
+        }
+        particles.geometry.attributes.position.needsUpdate = true;
+      },
+      onComplete: () => {
+        gsap.to(particles.material, {
+          opacity: 0,
+          duration: 1.5,
+          ease: 'power1.out',
+          onComplete: () => {
+            scene.remove(particles);
+            particles.geometry.dispose();
+            particles.material.dispose();
+          },
+        });
+      },
+    });
   }
 
   dispose() {

@@ -67,6 +67,10 @@ export class HUD {
         <span class="label">Red Lights Run</span>
         <span class="value" id="hud-ranreds">0</span>
       </div>
+      <div class="stat">
+        <span class="label">Hit & Run</span>
+        <span class="value" id="hud-hitrun">0</span>
+      </div>
       <div class="chaos-label" style="margin-top:0.75rem;">Chaos Meter</div>
       <div class="chaos-bar">
         <div class="fill" id="hud-chaos-fill"></div>
@@ -79,6 +83,7 @@ export class HUD {
     this.el.accidents = document.getElementById('hud-accidents');
     this.el.jaywalkers = document.getElementById('hud-jaywalkers');
     this.el.ranReds = document.getElementById('hud-ranreds');
+    this.el.hitRun = document.getElementById('hud-hitrun');
     this.el.chaosFill = document.getElementById('hud-chaos-fill');
 
     // Light bulb elements
@@ -99,6 +104,7 @@ export class HUD {
     if (this.el.accidents) this.el.accidents.textContent = stats.accidents ?? 0;
     if (this.el.jaywalkers) this.el.jaywalkers.textContent = stats.jaywalkers ?? 0;
     if (this.el.ranReds) this.el.ranReds.textContent = stats.ranReds ?? 0;
+    if (this.el.hitRun) this.el.hitRun.textContent = stats.hitPedestrians ?? 0;
 
     if (this.el.chaosFill) {
       const pct = Math.min(100, (chaosLevel ?? 0) * 100);
