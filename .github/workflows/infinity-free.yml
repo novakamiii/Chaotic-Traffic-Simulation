@@ -17,13 +17,22 @@ jobs:
       - name: Get latest code
         uses: actions/checkout@v4
 
-      # Step 2: Upload code via FTP
+      # Step 2: Build JS bundle with correct asset paths
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx vite build
+
+      # Step 3: Upload code via FTP
       - name: Deploy to InfinityFree via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ftpupload.net
           username: ${{ secrets.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD }}
-          server-dir: /chaotictrafficsim.freedev.app/htdocs/ # For addon domains
+          server-dir: /chaotictrafficsim.freedev.app/htdocs/
           timeout: 86400000
           log-level: standard
