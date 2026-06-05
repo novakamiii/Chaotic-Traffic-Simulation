@@ -188,18 +188,32 @@ export function crash() {
 
 let wilhelmBuffer = null;
 
+function dataUrlToArrayBuffer(dataUrl) {
+  // data:audio/mpeg;base64,AAAA...
+  const comma = dataUrl.indexOf(',');
+  if (comma === -1) return null;
+  const base64 = dataUrl.slice(comma + 1);
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
 export async function playWilhelmScream(isFemale) {
   const c = getCtx();
   if (!c) return;
 
-  // Decode the MP3 once, cache the buffer
+  // Decode the MP3 once, cache the buffer — zero network requests
   if (!wilhelmBuffer) {
     try {
-      const resp = await fetch(wilhelmUrl);
-      const arrayBuf = await resp.arrayBuffer();
+      const arrayBuf = dataUrlToArrayBuffer(wilhelmUrl);
+      if (!arrayBuf) return;
       wilhelmBuffer = await c.decodeAudioData(arrayBuf);
     } catch {
-      return; // File not loaded yet, skip silently
+      return; // Decode failed, skip silently
     }
   }
 
