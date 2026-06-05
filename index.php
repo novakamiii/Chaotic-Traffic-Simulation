@@ -85,6 +85,7 @@ function renderAppPage(): void
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>The Wait — Avant Garde Traffic</title>
+        <link rel="icon" type="image/svg+xml" href="src/favicon.svg">
         <link rel="stylesheet" href="src/style.css">
     </head>
     <body>
